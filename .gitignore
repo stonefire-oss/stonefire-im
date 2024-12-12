@@ -1,0 +1,12 @@
+vendor
+.idea/
+/bin/
+/cover/
+
+# Compiled Objects
+*.o
+*.a
+*.so
+
+# Execludable
+*.exe

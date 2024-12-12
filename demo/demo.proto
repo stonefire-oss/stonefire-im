@@ -1,0 +1,28 @@
+syntax = "proto3";
+package pb;
+option go_package="/pb";
+
+// this is a comment
+message Student {
+  string name = 1;
+  bool male = 2;
+  repeated int32 scores = 3;
+}
+
+message Echo {
+  string name = 1;
+  string msg = 2;
+}
+
+message Result {
+  int32 code = 1;
+  string message = 2;
+}
+
+service StudentService {
+  rpc CreateStudent(Student) returns (Result) {};
+  rpc Hello(stream Student) returns (stream Echo);
+}
+
+
+
