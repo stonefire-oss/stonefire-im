@@ -16,28 +16,29 @@ const (
 	SessionTimeoutErr     = 0xFF00
 	UnSupportMessageErr   = 0xFF01
 	ServiceUnavailableErr = 0xFF02
+	ApplicationErr        = 0xFFFF
 
 	SessionTimeoutErrMsg     = "session timeout"
 	UnSupportMessageErrMsg   = "unsupport message type"
 	ServiceUnavailableErrMsg = "service unavailable"
 )
 
-type closeReason uint64
+type CloseReason uint64
 
-func (r closeReason) code() quic.ApplicationErrorCode {
+func (r CloseReason) code() quic.ApplicationErrorCode {
 	return quic.ApplicationErrorCode(r)
 }
 
-func (r closeReason) String() string {
+func (r CloseReason) String() string {
 	switch r {
 	case NoError:
 		return "no error"
 	case SessionTimeoutErr:
-		return "session timeout"
+		return SessionTimeoutErrMsg
 	case UnSupportMessageErr:
-		return "unsupport message type"
+		return UnSupportMessageErrMsg
 	case ServiceUnavailableErr:
-		return "service unavailable"
+		return ServiceUnavailableErrMsg
 	default:
 		return fmt.Sprintf("unknown code %d", r)
 	}
@@ -46,7 +47,6 @@ func (r closeReason) String() string {
 type qrpcConn struct {
 	conn              quic.Connection
 	quit              *utils.Event
-	handler           streamHandler
 	closed            *utils.Event
 	mu                sync.Mutex
 	idle              time.Time
@@ -55,20 +55,23 @@ type qrpcConn struct {
 	plmk              codec.PayloadBuilder
 }
 
-func newQRPConn(conn quic.Connection, s *Server, handler streamHandler) *qrpcConn {
+func newQRPConn(conn quic.Connection, s *Server) *qrpcConn {
 	qc := &qrpcConn{
 		conn:              conn,
 		quit:              s.quit,
-		handler:           handler,
 		closed:            utils.NewEvent(),
 		maxConnectionIdle: s.opts.maxConnectionIdle,
 		ctx:               context.Background(),
-		plmk:              utils.NewPooledPlMaker(s.opts.bufferPool),
+		plmk:              &pooledPLMaker{s.opts.bufferPool},
 	}
 	return qc
 }
 
-func (c *qrpcConn) close(r closeReason) error {
+func (c *qrpcConn) closeWithReason(r CloseReason) error {
+	return c.close(r.code(), r.String())
+}
+
+func (c *qrpcConn) close(code quic.ApplicationErrorCode, msg string) error {
 	c.mu.Lock()
 
 	defer func() {
@@ -76,7 +79,7 @@ func (c *qrpcConn) close(r closeReason) error {
 	}()
 
 	if c.closed.Fire() {
-		return c.conn.CloseWithError(r.code(), r.String())
+		return c.conn.CloseWithError(code, msg)
 	}
 	return nil
 }
@@ -102,7 +105,7 @@ func (c *qrpcConn) keepalive() {
 			val := c.maxConnectionIdle - time.Since(idle)
 			c.mu.Unlock()
 			if val < 0 {
-				c.close(SessionTimeoutErr)
+				c.closeWithReason(SessionTimeoutErr)
 				return
 			}
 			idleTimer.Reset(val)
@@ -122,16 +125,29 @@ type UserAgent struct {
 	OSType        string
 }
 
-type userAgentKey struct{}
+type serverConnKey struct{}
 
-func (c *qrpcConn) Serve() error {
-	if c.quit.HasFired() {
-		c.close(SessionTimeoutErr)
+func qrpcConnFromContext(ctx context.Context) *qrpcConn {
+	if ctx == nil {
 		return nil
 	}
 
+	if qrpc, ok := ctx.Value(serverConnKey{}).(*qrpcConn); ok {
+		return qrpc
+	}
+	return nil
+}
+
+func (c *qrpcConn) Serve(handler streamHandler) error {
+	if c.quit.HasFired() {
+		c.closeWithReason(ServiceUnavailableErr)
+		return nil
+	}
+
+	go c.keepalive()
+
 	defer func() {
-		c.close(ServiceUnavailableErr)
+		c.closeWithReason(SessionTimeoutErr)
 	}()
 
 	for {
@@ -139,7 +155,7 @@ func (c *qrpcConn) Serve() error {
 			return nil
 		}
 
-		ctx := context.WithValue(c.ctx, userAgentKey{}, UserAgent{})
+		ctx := context.WithValue(c.ctx, serverConnKey{}, c)
 		stream, err := c.conn.AcceptStream(ctx)
 		if err != nil {
 			if appErr, ok := err.(*quic.ApplicationError); ok {
@@ -151,12 +167,14 @@ func (c *qrpcConn) Serve() error {
 		}
 
 		msg, err := codec.DecodeOneMessage(stream, c.plmk)
+		if err != nil {
+			return err
+		}
 		switch vv := msg.(type) {
 		case *codec.Disconnect:
-			return c.close(NoError)
+			return c.closeWithReason(NoError)
 		case *codec.Connect:
 			c.idle = time.Now()
-			fmt.Println("%s", vv.ClientId)
 			return nil
 		case *codec.Ping:
 			c.idle = time.Now()
@@ -166,9 +184,12 @@ func (c *qrpcConn) Serve() error {
 			}
 		case *codec.Publish:
 			c.idle = time.Now()
-			c.handler(ctx, vv, stream)
+			handler(ctx, vv, stream)
 		default:
-			return c.close(UnSupportMessageErr)
+			if pc, ok := vv.(codec.PayloadContainer); ok {
+				FreePayload(pc)
+			}
+			return c.closeWithReason(UnSupportMessageErr)
 		}
 	}
 }

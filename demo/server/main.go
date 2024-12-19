@@ -24,7 +24,17 @@ func (s *studentSrv) CreateStudent(ctx context.Context, st *pb.Student) (*pb.Res
 }
 
 func (s *studentSrv) Hello(stream grpc.BidiStreamingServer[pb.Student, pb.Echo]) error {
-	return nil
+	for {
+		stu, err := stream.Recv()
+		if err != nil {
+			return err
+		}
+		ec := pb.Echo{Name: stu.Name, Msg: "OK"}
+		err = stream.Send(&ec)
+		if err != nil {
+			return err
+		}
+	}
 }
 
 const addr = "localhost:4242"

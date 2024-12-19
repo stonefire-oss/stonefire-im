@@ -79,14 +79,18 @@ const (
 	msgTypeFirstInvalid
 )
 
-type Props map[string]string
+type Props map[string][]string
 
 func (p Props) Encode(buf *bytes.Buffer) error {
 	encodeLength(int32(len(p)), buf)
 	if len(p) > 0 {
 		for k, v := range p {
 			setString(k, buf)
-			setString(v, buf)
+			lv := len(v)
+			encodeLength(int32(lv), buf)
+			for i := 0; i < lv; i++ {
+				setString(v[i], buf)
+			}
 		}
 	}
 	return nil
@@ -98,9 +102,44 @@ func (p Props) Decode(r io.Reader, packetRemaining *int32) error {
 
 	for i := int32(0); i < len; i++ {
 		k := getString(r, packetRemaining)
-		v := getString(r, packetRemaining)
-		p[k] = v
+		vl, vll := decodeLength(r)
+		*packetRemaining = *packetRemaining - int32(vll)
+		va := make([]string, 0, vl)
+		for i := 0; i < int(vl); i++ {
+			v := getString(r, packetRemaining)
+			va = append(va, v)
+		}
+
+		p[k] = va
 	}
+	return nil
+}
+
+type Status struct {
+	Code    uint8
+	Message string
+}
+
+func (p *Status) Encode(buf *bytes.Buffer) error {
+	c := p.Code
+	if len(p.Message) > 0 {
+		c |= 0x80
+		setUint8(c, buf)
+		setString(p.Message, buf)
+	} else {
+		c &= 0x7F
+		setUint8(c, buf)
+	}
+	return nil
+}
+
+func (p *Status) Decode(r io.Reader, packetRemaining *int32) error {
+	c := getUint8(r, packetRemaining)
+
+	if c&0x80 == 0x80 {
+		p.Message = getString(r, packetRemaining)
+	}
+	p.Code = 0x7F & c
 	return nil
 }
 
@@ -115,6 +154,11 @@ type Message interface {
 	Decode(r io.Reader, hdr Header, packetRemaining int32, builder PayloadBuilder) error
 }
 
+type PayloadContainer interface {
+	GetPayload() Payload
+	SetPayload(Payload)
+}
+
 type Payload interface {
 	ReadOnlyData() []byte
 	Len() int
@@ -125,6 +169,9 @@ type SlicePayload []byte
 type SlicePayloadBuiler struct{}
 
 func (b SlicePayloadBuiler) MakePayload(r io.Reader, l int) (Payload, error) {
+	if l <= 0 {
+		return nil, nil
+	}
 	bs := make(SlicePayload, l)
 	_, err := io.ReadFull(r, bs)
 	return bs, err

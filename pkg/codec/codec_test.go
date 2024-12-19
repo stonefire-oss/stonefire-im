@@ -16,10 +16,11 @@ type testCase struct {
 
 func makePublish() *testCase {
 	pub := Publish{
-		Header:  Header{AckRequired: true},
-		Path:    "/path/b",
-		Payload: SlicePayload([]byte("abcd")),
-		Props:   Props{"a": "a", "b": "b"},
+		Header:    Header{AckRequired: true},
+		Path:      "/path/b",
+		MessageId: 1,
+		Payload:   SlicePayload([]byte("abcd")),
+		Props:     Props{"a": {"a"}, "b": {"b"}},
 	}
 
 	buf := new(bytes.Buffer)
@@ -35,6 +36,7 @@ func makePublish() *testCase {
 func makePubAck() *testCase {
 	pub := PubAck{
 		Header:  Header{AckRequired: true},
+		Status:  Status{Code: 127, Message: "OK"},
 		Payload: SlicePayload([]byte("abcd")),
 	}
 
@@ -63,6 +65,21 @@ func makePing() *testCase {
 	}
 }
 
+func makePingAck() *testCase {
+	ack := PingAck{
+		Header: Header{AckRequired: false},
+	}
+
+	buf := new(bytes.Buffer)
+	ack.Encode(buf)
+	return &testCase{
+		name:    "pingack",
+		reader:  buf,
+		wantMsg: &ack,
+		wantErr: false,
+	}
+}
+
 func makeConn() *testCase {
 	con := Connect{
 		Header:          Header{AckRequired: true},
@@ -74,7 +91,7 @@ func makeConn() *testCase {
 		Authorization:   "Authorization",
 		ClientVersion:   "ClientVersion",
 		OSType:          "OSType",
-		Props:           Props{"a": "a", "b": "b"},
+		Props:           Props{"a": {"a"}, "b": {"b"}},
 		AuthFlag:        true,
 		ClientVerFlag:   true,
 		OSFlag:          true,
@@ -90,6 +107,44 @@ func makeConn() *testCase {
 	}
 }
 
+func makeConnAck() *testCase {
+	ack := ConnAck{
+		Header:         Header{AckRequired: false},
+		SessionPresent: true,
+		ReturnCode:     ReturnCode(20),
+		KeepAliveTimer: 100,
+		Domain:         "china.com",
+		AuthSchema:     "NTLM",
+		OptDomains:     "opt1,opt2,opt3",
+		DomainFlag:     true,
+		AuthSchemaFlag: true,
+		OptDomainFlag:  true,
+	}
+	buf := new(bytes.Buffer)
+	ack.Encode(buf)
+	return &testCase{
+		name:    "ConnAck",
+		reader:  buf,
+		wantMsg: &ack,
+		wantErr: false,
+	}
+}
+
+func makeDiscon() *testCase {
+	dis := Disconnect{
+		Header:     Header{AckRequired: false},
+		ReasonCode: 0,
+	}
+	buf := new(bytes.Buffer)
+	dis.Encode(buf)
+	return &testCase{
+		name:    "DisConnect",
+		reader:  buf,
+		wantMsg: &dis,
+		wantErr: false,
+	}
+}
+
 func TestDecodeOneMessage(t *testing.T) {
 	type args struct {
 		r io.Reader
@@ -99,6 +154,10 @@ func TestDecodeOneMessage(t *testing.T) {
 		makePublish(),
 		makeConn(),
 		makePubAck(),
+		makePing(),
+		makePingAck(),
+		makeConnAck(),
+		makeDiscon(),
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -58,10 +58,11 @@ func setUint16(val uint16, buf *bytes.Buffer) {
 	buf.WriteByte(byte(val & 0x00ff))
 }
 
-func setString(val string, buf *bytes.Buffer) {
+func setString(val string, buf *bytes.Buffer) int32 {
 	length := uint16(len(val))
 	setUint16(length, buf)
-	buf.WriteString(val)
+	n, _ := buf.WriteString(val)
+	return int32(n + 2)
 }
 
 func boolToByte(val bool) byte {
@@ -90,7 +91,7 @@ func decodeLength(r io.Reader) (int32, uint8) {
 	}
 
 	raiseError(errBadLengthEncoding)
-	panic("unreachable")
+	panic("codec decodeLength unreachable")
 }
 
 func encodeLength(length int32, buf *bytes.Buffer) int32 {

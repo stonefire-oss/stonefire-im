@@ -50,9 +50,10 @@ func (msg *Publish) Decode(r io.Reader, hdr Header, packetRemaining int32, build
 	msg.Props = make(Props)
 	msg.Props.Decode(r, &packetRemaining)
 
-	payloadReader := &io.LimitedReader{R: r, N: int64(packetRemaining)}
-
-	msg.Payload, err = builder.MakePayload(payloadReader, int(packetRemaining))
+	if packetRemaining > 0 {
+		payloadReader := &io.LimitedReader{R: r, N: int64(packetRemaining)}
+		msg.Payload, err = builder.MakePayload(payloadReader, int(packetRemaining))
+	}
 
 	return
 }
@@ -61,9 +62,18 @@ func (msg *Publish) String() string {
 	return "Publish"
 }
 
+func (msg *Publish) GetPayload() Payload {
+	return msg.Payload
+}
+
+func (msg *Publish) SetPayload(p Payload) {
+	msg.Payload = p
+}
+
 type PubAck struct {
 	Header
 	MessageId uint16
+	Status    Status
 	Payload   Payload
 }
 
@@ -72,10 +82,12 @@ func (msg *PubAck) Encode(w io.Writer) (err error) {
 
 	setUint16(msg.MessageId, buf)
 
-	var pl int32 = 0
+	msg.Status.Encode(buf)
+	pl := int32(0)
 	if msg.Payload != nil {
-		pl = int32(msg.Payload.Len())
+		pl = pl + int32(msg.Payload.Len())
 	}
+
 	if err = writeMessage(w, MsgPubAck, &msg.Header, buf, pl); err != nil {
 		return
 	}
@@ -93,19 +105,27 @@ func (msg *PubAck) Decode(r io.Reader, hdr Header, packetRemaining int32, builde
 
 	msg.Header = hdr
 
-	if msg.Header.AckRequired {
-		msg.MessageId = getUint16(r, &packetRemaining)
+	msg.MessageId = getUint16(r, &packetRemaining)
+	msg.Status.Decode(r, &packetRemaining)
+
+	if packetRemaining > 0 {
+		payloadReader := &io.LimitedReader{R: r, N: int64(packetRemaining)}
+		msg.Payload, err = builder.MakePayload(payloadReader, int(packetRemaining))
 	}
-
-	payloadReader := &io.LimitedReader{R: r, N: int64(packetRemaining)}
-
-	msg.Payload, err = builder.MakePayload(payloadReader, int(packetRemaining))
 
 	return
 }
 
 func (msg *PubAck) String() string {
 	return "PubAck"
+}
+
+func (msg *PubAck) GetPayload() Payload {
+	return msg.Payload
+}
+
+func (msg *PubAck) SetPayload(p Payload) {
+	msg.Payload = p
 }
 
 type Connect struct {
@@ -210,7 +230,7 @@ func (msg *ConnAck) Encode(w io.Writer) (err error) {
 	flags |= boolToByte(msg.AuthSchemaFlag) << 1
 	flags |= boolToByte(msg.SessionPresent)
 
-	buf.WriteByte(flags)
+	setUint8(flags, buf)
 	setUint8(uint8(msg.ReturnCode), buf)
 	setUint16(msg.KeepAliveTimer, buf)
 	if msg.AuthSchemaFlag {
@@ -223,7 +243,7 @@ func (msg *ConnAck) Encode(w io.Writer) (err error) {
 		setString(msg.OptDomains, buf)
 	}
 
-	return writeMessage(w, MsgConnect, &msg.Header, buf, 0)
+	return writeMessage(w, MsgConnAck, &msg.Header, buf, 0)
 }
 
 func (msg *ConnAck) Decode(r io.Reader, hdr Header, packetRemaining int32, builder PayloadBuilder) (err error) {
@@ -280,6 +300,7 @@ func (msg *Ping) Decode(r io.Reader, hdr Header, packetRemaining int32, builder 
 	if packetRemaining != 0 {
 		return errMsgTooLong
 	}
+	msg.Header = hdr
 	return nil
 }
 
@@ -299,6 +320,7 @@ func (msg *PingAck) Decode(r io.Reader, hdr Header, packetRemaining int32, build
 	if packetRemaining != 0 {
 		return errMsgTooLong
 	}
+	msg.Header = hdr
 	return nil
 }
 

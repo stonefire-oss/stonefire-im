@@ -14,7 +14,6 @@ import (
 	"github.com/stonefire-oss/stonefire-im/pkg/codec"
 	"github.com/stonefire-oss/stonefire-im/pkg/utils"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/encoding"
 	"google.golang.org/grpc/mem"
 )
 
@@ -22,6 +21,7 @@ const (
 	defaultServerMaxReceiveMessageSize = 1024 * 1024 * 4
 	defaultServerMaxSendMessageSize    = math.MaxInt32
 	defaultMaxConcurrentStreams        = 100
+	defaultMaxConnectionIdle           = time.Second * 3
 )
 
 type ServerOption interface {
@@ -98,6 +98,7 @@ var defaultServerOptions = serverOptions{
 	maxReceiveMessageSize: defaultServerMaxReceiveMessageSize,
 	maxSendMessageSize:    defaultServerMaxSendMessageSize,
 	maxConcurrentStreams:  defaultMaxConcurrentStreams,
+	maxConnectionIdle:     defaultMaxConnectionIdle,
 	bufferPool:            mem.DefaultBufferPool(),
 }
 
@@ -207,48 +208,55 @@ func (s *Server) handleStream(ctx context.Context, req *codec.Publish, stream qu
 	service := sm[:pos]
 	method := sm[pos+1:]
 	srv, knownService := s.services[service]
-	if !knownService {
-		return
+	if knownService {
+		if md, ok := srv.methods[method]; ok {
+			s.processUnaryRPC(ctx, md, srv, req, stream)
+			stream.Close()
+			return
+		}
+		if sd, ok := srv.streams[method]; ok {
+			s.processStreamingRPC(ctx, sd, srv, req, stream)
+			return
+		}
 	}
 
-	if md, ok := srv.methods[method]; ok {
-		s.processUnaryRPC(ctx, md, srv, req, stream)
-		return
+	ack := codec.PubAck{
+		Header:    codec.Header{AckRequired: req.AckRequired},
+		MessageId: req.MessageId,
+		Status:    codec.Status{Code: uint8(Unimplemented)},
 	}
+
+	ack.Encode(stream)
+	stream.Close()
+}
+
+func (s *Server) processStreamingRPC(ctx context.Context, sd *grpc.StreamDesc, info *serviceInfo, req *codec.Publish, stream quic.Stream) error {
+	ss := newServerStream(ctx, req, stream, qrpcConnFromContext(ctx), sd)
+	return sd.Handler(info.serviceImpl, ss)
 }
 
 func (s *Server) processUnaryRPC(ctx context.Context, md *grpc.MethodDesc, info *serviceInfo, req *codec.Publish, stream quic.Stream) error {
 	df := func(v any) error {
-		if req.Payload == nil {
-			return nil
-		}
-		pl := req.Payload.ReadOnlyData()
-		out := mem.BufferSlice{mem.NewBuffer(&pl, nil)}
-		defer func() {
-			out.Free()
-		}()
-		c := encoding.GetCodecV2("proto")
-		return c.Unmarshal(out, v)
+		defer FreePayload(req)
+		return DecodePayload(v, req.Payload, req.Compressed)
 	}
 	reply, appErr := md.Handler(info.serviceImpl, ctx, df, nil)
 	if appErr != nil {
 		return appErr
 	}
-	c := encoding.GetCodecV2("proto")
-	out, err := c.Marshal(reply)
+
+	bf, err := EncodePayload(reply, req.Compressed)
 
 	if err != nil {
 		return err
 	}
 
-	bf := out.MaterializeToBuffer(mem.DefaultBufferPool())
 	defer func() {
 		bf.Free()
-		out.Free()
 	}()
 
 	ack := codec.PubAck{
-		Header:    codec.Header{AckRequired: req.AckRequired},
+		Header:    codec.Header{AckRequired: req.AckRequired, Compressed: req.Compressed},
 		MessageId: req.MessageId,
 		Payload:   bf,
 	}
@@ -261,16 +269,34 @@ func (s *Server) handleRawConn(conn quic.Connection) {
 	streamQuota := utils.NewHandlerQuota(s.opts.maxConcurrentStreams)
 	handler := func(ctx context.Context, req *codec.Publish, stream quic.Stream) {
 		streamQuota.Acquire()
-		s.handleStream(ctx, req, stream)
-		defer func() {
-			streamQuota.Release()
-		}()
+
+		f := func() {
+			defer streamQuota.Release()
+			s.handleStream(ctx, req, stream)
+		}
+		if s.opts.numServerWorkers > 0 {
+			select {
+			case s.serverWorkerChannel <- f:
+				return
+			default:
+				ack := codec.PubAck{
+					Header:    codec.Header{AckRequired: req.AckRequired},
+					MessageId: req.MessageId,
+					Status:    codec.Status{Code: uint8(ResourceExhausted)},
+				}
+
+				ack.Encode(stream)
+				stream.Close()
+				return
+			}
+		}
+		go f()
 	}
 
-	qcon := newQRPConn(conn, s, handler)
+	qcon := newQRPConn(conn, s)
 	s.serveWG.Done()
 	f := func() {
-		qcon.Serve()
+		qcon.Serve(handler)
 	}
 	go f()
 }
